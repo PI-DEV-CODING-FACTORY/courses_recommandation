@@ -1,0 +1,26 @@
+# Ignore virtual environments
+venv/
+*.venv/
+env/
+*.env/
+
+# Ignore Python bytecode files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Ignore Git directory
+.git/
+
+# Ignore Docker files
+Dockerfile
+.dockerignore
+
+# Ignore specific IDE/editor directories
+.vscode/
+.idea/
+
+# Ignore test files/directories (if any)
+tests/
+*.test.py
