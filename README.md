@@ -1,6 +1,6 @@
 # Course Recommendation API
 
-This project is a FastAPI-based application that provides course recommendations using a K-Nearest Neighbors (KNN) model.
+This project is a FastAPI-based application that provides course recommendations using a K-Nearest Neighbors (KNN) model. This project also contains the implementation of the KNN model and a comparison with other models : in the comparison folder.
 
 ## Features
 
@@ -75,7 +75,7 @@ You can then access the API at `http://localhost:8000` and the auto-generated do
     ```bash
     docker run -p 80:80 courses-recommandation-app
     ```
-    The application will be accessible at `http://localhost:80`.
+    The application will be accessible at `http://localhost:8000`.
 
 ## API Endpoints
 

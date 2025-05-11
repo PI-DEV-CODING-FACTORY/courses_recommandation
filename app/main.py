@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from .models import InputFeatures, PredictionOutput, CompetencesInput, RecommendationOutput
-from .services import get_recommendations, load_artifacts
+from .services import get_recommendations, load_artifacts, get_svm_recommendation, load_svm_artifacts
 
 # Attempt to load artifacts when the app starts.
 # The services.py already calls load_artifacts() at import time.
@@ -46,10 +46,27 @@ async def get_multiple_recommendations(data: CompetencesInput):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
+@app.post("/recommendations/svm/", response_model=RecommendationOutput, tags=["Recommendations"])
+async def get_svm_recommendations(data: CompetencesInput):
+    try:
+        recommendations = get_svm_recommendation(data)
+        return RecommendationOutput(recommendations=recommendations)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
 # If you want a dedicated endpoint to check/reload artifacts (for admin/debug)
 @app.post("/admin/reload-artifacts/", tags=["Admin"], status_code=200)
 async def reload_all_artifacts():
-    if load_artifacts():
-        return {"message": "Artifacts reloaded successfully."}
+    knn_success = load_artifacts()
+    svm_success = load_svm_artifacts()
+    
+    if knn_success and svm_success:
+        return {"message": "All artifacts reloaded successfully."}
+    elif knn_success:
+        return {"message": "KNN artifacts reloaded successfully, but SVM artifacts failed."}
+    elif svm_success:
+        return {"message": "SVM artifacts reloaded successfully, but KNN artifacts failed."}
     else:
         raise HTTPException(status_code=500, detail="Failed to reload artifacts.")

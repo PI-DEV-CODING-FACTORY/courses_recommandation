@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import traceback
 import os
+import json
 from typing import Dict, Any, List
 from sklearn.neighbors import NearestNeighbors
 from .models import CompetencesInput, RecommendationItem
@@ -12,13 +13,20 @@ from .models import CompetencesInput, RecommendationItem
 MODEL_PATH = "data/your_knn_model.joblib"
 ENCODERS_PATH = "data/label_encoders.pkl"
 SCALER_PATH = "data/standard_scaler.pkl"
-REF_DATA_PATH = "data/df_reference.csv"  # Add path to the saved reference data
+REF_DATA_PATH = "data/df_reference.csv"
+
+# SVM model paths
+SVM_MODEL_PATH = "data/svm_model.pkl"
+SVM_ENCODERS_PATH = "data/encoders_svm.pkl"
 
 # --- Global Variables to Hold Loaded Artifacts ---
 knn_model = None
+svm_model = None
 label_encoders: Dict[str, Any] = {}
+svm_encoders: Dict[str, Any] = {}
 standard_scaler = None
 df_reference = None
+competence_mappings = None
 
 # Columns that were label encoded
 CATEGORICAL_COLS = ['Compétence_1', 'Compétence_2', 'Compétence_3',
@@ -90,57 +98,95 @@ def load_artifacts():
         print(traceback.format_exc())  # This prints the full traceback
         return False
 
+def load_svm_artifacts():
+    """Load SVM model and its encoders"""
+    global svm_model, svm_encoders
+    
+    try:
+        print("Loading SVM artifacts...")
+        
+        if not os.path.exists(SVM_MODEL_PATH):
+            print(f"ERROR: SVM model file not found at {SVM_MODEL_PATH}")
+            return False
+            
+        if not os.path.exists(SVM_ENCODERS_PATH):
+            print(f"ERROR: SVM encoders file not found at {SVM_ENCODERS_PATH}")
+            return False
+
+        # Load SVM model
+        svm_model = joblib.load(SVM_MODEL_PATH)
+        print(f"SVM model loaded successfully from {SVM_MODEL_PATH}")
+
+        # Load SVM encoders
+        svm_encoders = joblib.load(SVM_ENCODERS_PATH)
+        print(f"SVM encoders loaded successfully from {SVM_ENCODERS_PATH}")
+        
+        # Load competence mappings if available
+        global competence_mappings
+        mappings_path = "data/competence_mappings.json"
+        if os.path.exists(mappings_path):
+            with open(mappings_path, 'r') as f:
+                competence_mappings = json.load(f)
+            print(f"Competence mappings loaded successfully from {mappings_path}")
+
+        return True
+    except Exception as e:
+        print(f"Error loading SVM artifacts: {e}")
+        print(traceback.format_exc())
+        return False
+
 def get_recommendations(data: CompetencesInput) -> List[RecommendationItem]:
     """
     Get top N recommendations based on a list of competences using KNN.
     """
-    global knn_model, label_encoders, standard_scaler, df_reference
+    global df_reference
 
-    if label_encoders is None or df_reference is None:
-        print("Artifacts not loaded. Cannot predict.")
+    if df_reference is None:
+        print("Reference data not loaded. Cannot predict.")
         if not load_artifacts():  # Attempt to load them
-            raise ValueError("Error: Model or preprocessing artifacts not available.")
+            raise ValueError("Error: Reference data not available.")
 
     try:
         # Extract input competences and top_n
         input_competences = data.competences
         top_n = min(data.top_n, 20)  # Limit to 20 max recommendations
-        
+
         print(f"Processing request for competences: {input_competences}, top_n: {top_n}")
-        
+
+        # Validate that the competences exist in our dataset
+        all_competences = set()
+        for comp_col in ['Compétence_1', 'Compétence_2', 'Compétence_3']:
+            all_competences.update(df_reference[comp_col].unique())
+
+        for comp in input_competences:
+            if comp not in all_competences:
+                raise ValueError(f"Invalid competence value: {comp}")
+
         # Calculate how many unique formations we have in the dataset
         unique_formation_count = len(df_reference['Formation_Recommandée'].unique())
         
         # Request more neighbors initially to account for duplicates
-        # We'll request either 3x the requested number or the total unique formations, whichever is smaller
         initial_neighbors = min(top_n * 3, unique_formation_count)
         
         # Initialize a nearest neighbors model for finding similar formations
         nearest_neighbors = NearestNeighbors(n_neighbors=initial_neighbors, metric='cosine')
         
-        # Create a matrix of all competences from the reference data
-        all_competences = set()
-        for comp_col in ['Compétence_1', 'Compétence_2', 'Compétence_3']:
-            all_competences.update(df_reference[comp_col].unique())
-            
         # Build a binary feature vector for the input competences
         competence_vector = np.zeros(len(all_competences))
         all_competences_list = list(all_competences)
         
         for competence in input_competences:
-            if competence in all_competences_list:
-                idx = all_competences_list.index(competence)
-                competence_vector[idx] = 1
-                
+            idx = all_competences_list.index(competence)
+            competence_vector[idx] = 1
+            
         # Build feature vectors for all records in the reference data
         reference_vectors = np.zeros((len(df_reference), len(all_competences)))
         
         for i, row in df_reference.iterrows():
             for comp_col in ['Compétence_1', 'Compétence_2', 'Compétence_3']:
                 competence = row[comp_col]
-                if competence in all_competences_list:
-                    idx = all_competences_list.index(competence)
-                    reference_vectors[i, idx] = 1
+                idx = all_competences_list.index(competence)
+                reference_vectors[i, idx] = 1
                     
         # Fit the nearest neighbors model
         nearest_neighbors.fit(reference_vectors)
@@ -167,15 +213,17 @@ def get_recommendations(data: CompetencesInput) -> List[RecommendationItem]:
             final_score += 0.2 * rating_factor
             
             # 3. Duration boost - favor medium length courses (10% weight)
-            # Courses around 20 hours get higher boost
             duration_factor = 1.0 - min(1.0, abs(record['Durée_Formation'] - 20) / 10)
             final_score += 0.1 * duration_factor
             
-            # 4. Diversity bonus - to encourage varied results (10% weight)
-            # This would ideally look at previously shown recommendations to avoid similar ones
-            # For now, we'll just use a small random factor
-            diversity_factor = np.random.uniform(0, 1)
-            final_score += 0.1 * diversity_factor
+            # 4. Competence match bonus (10% weight)
+            match_count = sum(1 for comp in input_competences if comp in [
+                record['Compétence_1'],
+                record['Compétence_2'],
+                record['Compétence_3']
+            ])
+            match_factor = match_count / len(input_competences)
+            final_score += 0.1 * match_factor
             
             # Ensure score stays in 0-1 range
             final_score = min(1.0, max(0, final_score))
@@ -229,12 +277,6 @@ def get_recommendations(data: CompetencesInput) -> List[RecommendationItem]:
             if len(recommendations) >= top_n:
                 break
                 
-        # If we didn't get enough unique recommendations, we might need to request more from KNN
-        if len(recommendations) < top_n and len(recommendations) < len(df_reference['Formation_Recommandée'].unique()):
-            # We could add more complex logic here to get additional recommendations
-            # For now we'll just return what we have
-            pass
-            
         return recommendations
             
     except Exception as e:
@@ -242,10 +284,130 @@ def get_recommendations(data: CompetencesInput) -> List[RecommendationItem]:
         print(traceback.format_exc())
         raise ValueError(f"Error processing recommendation: {str(e)}")
 
+def get_svm_recommendation(data: CompetencesInput):
+    """Get course recommendation using SVM model"""
+    global svm_model, svm_encoders, df_reference, competence_mappings
+
+    if svm_model is None or svm_encoders is None:
+        if not load_svm_artifacts():
+            raise ValueError("SVM model or encoders not available")
+
+    try:
+        # Get reference data if not loaded
+        if df_reference is None:
+            df_reference = pd.read_csv("data/df_reference.csv")
+
+        # Validate input length
+        if not 1 <= len(data.competences) <= 3:
+            raise ValueError("Between 1 and 3 competences are required")
+
+        # Collect all valid competences across positions
+        valid_competences = set()
+        if competence_mappings:
+            for col in ['Compétence_1', 'Compétence_2', 'Compétence_3']:
+                valid_competences.update(competence_mappings[col]['values'])
+        else:
+            # Fallback to using reference data
+            for col in ['Compétence_1', 'Compétence_2', 'Compétence_3']:
+                valid_competences.update(df_reference[col].unique())
+        
+        # Validate input competences
+        for comp in data.competences:
+            if comp not in valid_competences:
+                raise ValueError(f"Invalid competence value: {comp}. Valid competences are: {sorted(valid_competences)}")
+        
+        # Find best positions for provided competences
+        input_competences = data.competences.copy()
+        final_competences = [None, None, None]
+        
+        # Try to match each competence to its most common position in the training data
+        for comp in input_competences:
+            # Count occurrences in each position
+            counts = [0, 0, 0]
+            for i, col in enumerate(['Compétence_1', 'Compétence_2', 'Compétence_3']):
+                matching_rows = df_reference[df_reference[col] == comp]
+                counts[i] = len(matching_rows)
+            
+            # Find the position where this competence appears most often
+            best_pos = counts.index(max(counts))
+            
+            # If that position is already taken, try next best position
+            while final_competences[best_pos] is not None:
+                counts[best_pos] = -1  # Mark this position as invalid
+                if max(counts) <= 0:  # No more valid positions
+                    best_pos = None
+                    break
+                best_pos = counts.index(max(counts))
+            
+            if best_pos is None:
+                # If we couldn't find a position, put it in the first available slot
+                for i in range(3):
+                    if final_competences[i] is None:
+                        best_pos = i
+                        break
+            
+            final_competences[best_pos] = comp
+
+        # Fill any remaining positions with the last valid competence
+        last_comp = final_competences[max(i for i, x in enumerate(final_competences) if x is not None)]
+        final_competences = [c if c is not None else last_comp for c in final_competences]
+
+        # Encode competences in their optimal positions
+        encoded_input = []
+        for i, comp in enumerate(final_competences):
+            try:
+                encoded_value = svm_encoders[f'Compétence_{i+1}'].transform([comp])[0]
+                encoded_input.append(encoded_value)
+            except:
+                print(f"Error encoding {comp} for position {i+1}")
+                raise ValueError(f"Error encoding competence {comp}. This competence may not be valid for position {i+1}.")
+
+        # Add placeholder values for other required features
+        encoded_input.extend([
+            0,  # Formation_Suivie (using a default value)
+            20, # Durée_Formation (average duration)
+            4.5,  # Note_Formation (good rating)
+            0,  # Centre_Intérêt (default value)
+        ])
+
+        # Get predictions with probabilities
+        predicted_classes = svm_model.predict_proba([encoded_input])[0]
+        
+        # Get top N recommendations based on probability scores
+        top_n = min(data.top_n, 20)  # Limit to 20 recommendations
+        top_indices = predicted_classes.argsort()[-top_n:][::-1]
+        
+        recommendations = []
+        for idx in top_indices:
+            formation = svm_encoders['Formation_Recommandée'].inverse_transform([idx])[0]
+            probability = float(predicted_classes[idx])
+            
+            # Find matching row in reference data for additional details
+            matching_rows = df_reference[df_reference['Formation_Recommandée'] == formation]
+            if not matching_rows.empty:
+                row = matching_rows.iloc[0]
+                recommendation = RecommendationItem(
+                    formation=formation,
+                    similarity_score=probability,
+                    competences=final_competences,  # Use the optimally ordered competences
+                    centre_interet=row['Centre_Intérêt'],
+                    duree=int(row['Durée_Formation']),
+                    note=float(row['Note_Formation'])
+                )
+                recommendations.append(recommendation)
+
+        return recommendations
+
+    except Exception as e:
+        print(f"Error during SVM recommendation: {e}")
+        print(traceback.format_exc())
+        raise
+
 # --- Initialize models at startup ---
 try:
     print("Attempting to load artifacts at startup...")
     load_artifacts()
+    load_svm_artifacts()
 except Exception as e:
     print(f"Failed to load artifacts at startup, but continuing: {e}")
     print(traceback.format_exc())
