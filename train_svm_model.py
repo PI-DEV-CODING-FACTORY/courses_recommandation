@@ -8,7 +8,7 @@ import json
 import os
 
 # Load the dataset
-df = pd.read_csv("data/Recommandation_de_formations_expanded (1).csv")
+df = pd.read_csv("data/df_reference.csv")
 
 # Columns to encode
 categorical_cols = ['Compétence_1', 'Compétence_2', 'Compétence_3', 

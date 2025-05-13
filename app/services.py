@@ -10,10 +10,10 @@ from sklearn.neighbors import NearestNeighbors
 from .models import CompetencesInput, RecommendationItem
 
 # --- Artifact Paths ---
-MODEL_PATH = "data/your_knn_model.joblib"
-ENCODERS_PATH = "data/label_encoders.pkl"
-SCALER_PATH = "data/standard_scaler.pkl"
-REF_DATA_PATH = "data/df_reference.csv"
+MODEL_PATH = "data/your_knn_model.joblib"  # Matches MODEL_SAVE_PATH in train_model.py
+ENCODERS_PATH = "data/label_encoders.pkl"  # Matches ENCODERS_PATH in train_model.py
+SCALER_PATH = "data/standard_scaler.pkl"  # Matches SCALER_PATH in train_model.py
+REF_DATA_PATH = "data/df_reference.csv"  # Matches DATASET_PATH in train_model.py
 
 # SVM model paths
 SVM_MODEL_PATH = "data/svm_model.pkl"
@@ -320,8 +320,16 @@ def get_svm_recommendation(data: CompetencesInput):
         input_competences = data.competences.copy()
         final_competences = [None, None, None]
         
-        # Try to match each competence to its most common position in the training data
-        for comp in input_competences:
+        # Limit to first 3 competences if more are provided
+        if len(valid_input_competences) > 3:
+            valid_input_competences = valid_input_competences[:3]
+        
+        print(f"Using competences: {valid_input_competences}")
+        
+        # Find optimal positions for each competence based on reference data
+        final_competences = [None, None, None]  # Initialize with None for all 3 positions
+        
+        for comp in valid_input_competences:
             # Count occurrences in each position
             counts = [0, 0, 0]
             for i, col in enumerate(['Compétence_1', 'Compétence_2', 'Compétence_3']):
@@ -352,54 +360,88 @@ def get_svm_recommendation(data: CompetencesInput):
         last_comp = final_competences[max(i for i, x in enumerate(final_competences) if x is not None)]
         final_competences = [c if c is not None else last_comp for c in final_competences]
 
-        # Encode competences in their optimal positions
-        encoded_input = []
-        for i, comp in enumerate(final_competences):
+        # Create a query point with the input competences
+        query_point = []
+        
+        # For each competence position, encode the corresponding competence
+        for i, comp_col in enumerate(['Compétence_1', 'Compétence_2', 'Compétence_3']):
             try:
-                encoded_value = svm_encoders[f'Compétence_{i+1}'].transform([comp])[0]
-                encoded_input.append(encoded_value)
-            except:
-                print(f"Error encoding {comp} for position {i+1}")
-                raise ValueError(f"Error encoding competence {comp}. This competence may not be valid for position {i+1}.")
-
+                # Get the competence for this position
+                comp = final_competences[i]
+                # Encode it
+                encoded_value = label_encoders[comp_col].transform([comp])[0]
+                query_point.append(encoded_value)
+            except Exception as e:
+                print(f"Error encoding competence {comp} for position {i+1}: {e}")
+                # Use a default value if encoding fails
+                query_point.append(0)
+        
         # Add placeholder values for other required features
-        encoded_input.extend([
+        query_point.extend([
             0,  # Formation_Suivie (using a default value)
-            20, # Durée_Formation (average duration)
-            4.5,  # Note_Formation (good rating)
+            0,  # Durée_Formation (will be scaled by the scaler)
+            0,  # Note_Formation (will be scaled by the scaler)
             0,  # Centre_Intérêt (default value)
         ])
-
-        # Get predictions with probabilities
-        predicted_classes = svm_model.predict_proba([encoded_input])[0]
         
-        # Get top N recommendations based on probability scores
-        top_n = min(data.top_n, 20)  # Limit to 20 recommendations
-        top_indices = predicted_classes.argsort()[-top_n:][::-1]
+        # Scale the numerical features in the query point
+        numerical_indices = [3, 4]  # Assuming positions 3 and 4 are Durée_Formation and Note_Formation
+        query_array = np.array([query_point])
+        query_array[:, numerical_indices] = standard_scaler.transform(query_array[:, numerical_indices])
         
-        recommendations = []
-        for idx in top_indices:
-            formation = svm_encoders['Formation_Recommandée'].inverse_transform([idx])[0]
-            probability = float(predicted_classes[idx])
+        # Get the feature matrix from the reference data
+        X_ref = df_reference.drop('Formation_Recommandée', axis=1)
+        for col in X_ref.columns:
+            if col in label_encoders:
+                X_ref[col] = label_encoders[col].transform(X_ref[col])
+        
+        # Scale the numerical features in the reference data
+        X_ref[NUMERICAL_COLS] = standard_scaler.transform(X_ref[NUMERICAL_COLS])
+        
+        # Use the KNN model to predict
+        # First approach: Use the model directly if it's compatible
+        try:
+            # Get the distances and indices of the nearest neighbors
+            distances, indices = knn_model.kneighbors(query_array)
             
-            # Find matching row in reference data for additional details
-            matching_rows = df_reference[df_reference['Formation_Recommandée'] == formation]
-            if not matching_rows.empty:
-                row = matching_rows.iloc[0]
-                recommendation = RecommendationItem(
-                    formation=formation,
-                    similarity_score=probability,
-                    competences=final_competences,  # Use the optimally ordered competences
-                    centre_interet=row['Centre_Intérêt'],
-                    duree=int(row['Durée_Formation']),
-                    note=float(row['Note_Formation'])
-                )
-                recommendations.append(recommendation)
-
+            # Convert distances to similarity scores (1 / (1 + distance))
+            similarities = 1 / (1 + distances[0])
+            
+            # Get the indices of the nearest neighbors
+            neighbor_indices = indices[0]
+        except Exception as e:
+            print(f"Could not use KNN model directly: {e}. Using NearestNeighbors instead.")
+            # Fallback: Use NearestNeighbors
+            nn = NearestNeighbors(n_neighbors=min(data.top_n, len(X_ref)), metric='euclidean')
+            nn.fit(X_ref)
+            
+            # Find nearest neighbors
+            distances, indices = nn.kneighbors(query_array)
+            
+            # Convert distances to similarity scores
+            similarities = 1 / (1 + distances[0])
+            
+            # Get the indices of the nearest neighbors
+            neighbor_indices = indices[0]
+        
+        # Create recommendation items
+        recommendations = []
+        for i, idx in enumerate(neighbor_indices):
+            row = df_reference.iloc[idx]
+            recommendation = RecommendationItem(
+                formation=row['Formation_Recommandée'],
+                similarity_score=float(similarities[i]),
+                competences=final_competences,  # Use the optimally ordered competences
+                centre_interet=row['Centre_Intérêt'],
+                duree=int(row['Durée_Formation']),
+                note=float(row['Note_Formation'])
+            )
+            recommendations.append(recommendation)
+        
         return recommendations
 
     except Exception as e:
-        print(f"Error during SVM recommendation: {e}")
+        print(f"Error during recommendation: {e}")
         print(traceback.format_exc())
         raise
 

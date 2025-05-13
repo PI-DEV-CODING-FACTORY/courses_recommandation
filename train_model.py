@@ -1,17 +1,20 @@
 import pandas as pd
 from sklearn.model_selection import train_test_split
-from sklearn.neighbors import KNeighborsClassifier # Or KNeighborsRegressor if it's a regression task
-from sklearn.preprocessing import StandardScaler # Optional: if you need feature scaling
-from sklearn.metrics import accuracy_score # Or other relevant metrics
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.metrics import accuracy_score, classification_report
 import joblib
+import pickle
 import os
 
 # --- Configuration ---
-DATASET_PATH = "data/your_dataset.csv"  # IMPORTANT: Update this to your dataset file
-MODEL_SAVE_PATH = "data/your_knn_model.pkl" # This should match MODEL_PATH in app/services.py
+DATASET_PATH = "data/df_reference.csv"  # Path to your dataset file
+MODEL_SAVE_PATH = "data/your_knn_model.joblib"  # Matches MODEL_PATH in app/services.py
+ENCODERS_PATH = "data/label_encoders.pkl"  # Matches ENCODERS_PATH in app/services.py
+SCALER_PATH = "data/standard_scaler.pkl"  # Matches SCALER_PATH in app/services.py
 TEST_SIZE = 0.2
 RANDOM_STATE = 42
-N_NEIGHBORS = 5 # Example: Number of neighbors for KNN
+N_NEIGHBORS = 5
 
 # Create data directory if it doesn't exist
 os.makedirs("data", exist_ok=True)
@@ -32,51 +35,53 @@ def load_data(path: str) -> pd.DataFrame:
 
 def preprocess_data(df: pd.DataFrame):
     """
-    Preprocesses the data.
-    This is where you'd handle missing values, feature engineering, scaling, etc.
-    Modify this function based on your dataset's needs.
+    Preprocesses the data with label encoding for categorical features and scaling for numerical features.
     """
     print("Preprocessing data...")
-    # --- TODO: Add your preprocessing steps here ---
-    # Example: Separating features (X) and target (y)
-    # Assuming the last column is the target variable
-    # X = df.iloc[:, :-1]
-    # y = df.iloc[:, -1]
-
-    # Example: Feature Scaling (optional, but often good for KNN)
-    # scaler = StandardScaler()
-    # X_scaled = scaler.fit_transform(X)
-    # X = pd.DataFrame(X_scaled, columns=X.columns)
-    
-    # For this placeholder, we'll assume X and y are defined.
-    # Replace this with your actual feature and target separation.
     if df is None or df.empty:
         print("Cannot preprocess empty or None dataframe.")
-        return None, None
+        return None, None, None, None
 
-    # --- Replace with your actual feature and target column names/logic ---
-    print("Please update the preprocess_data function in train_model.py with your actual feature (X) and target (y) separation logic.")
-    # As a placeholder, let's assume 'target' is the name of your target column
-    # And all other columns are features.
-    if 'target' not in df.columns:
-        print("Error: 'target' column not found in the dataset. Please define your target variable (y) and features (X) in preprocess_data().")
-        return None, None
-        
-    X = df.drop('target', axis=1)
-    y = df['target']
-    # --- End of placeholder ---
+    # Define categorical and numerical columns
+    categorical_cols = ['Compétence_1', 'Compétence_2', 'Compétence_3',
+                        'Formation_Suivie', 'Centre_Intérêt', 'Formation_Recommandée']
+    numerical_cols = ['Durée_Formation', 'Note_Formation']
+    
+    # Check if all required columns exist
+    for col in categorical_cols + numerical_cols:
+        if col not in df.columns:
+            print(f"Error: '{col}' column not found in the dataset.")
+            return None, None, None, None
+    
+    # Create a copy to avoid modifying the original dataframe
+    df_processed = df.copy()
+    
+    # Initialize dictionaries to store encoders
+    label_encoders = {}
+    
+    # Label encode categorical columns
+    for col in categorical_cols:
+        le = LabelEncoder()
+        df_processed[col] = le.fit_transform(df_processed[col])
+        label_encoders[col] = le
+        print(f"Encoded {col} with {len(le.classes_)} unique values")
+    
+    # Extract features (X) and target (y)
+    X = df_processed.drop('Formation_Recommandée', axis=1)
+    y = df_processed['Formation_Recommandée']
+    
+    # Scale numerical features
+    scaler = StandardScaler()
+    X[numerical_cols] = scaler.fit_transform(X[numerical_cols])
     
     print("Data preprocessing complete.")
-    return X, y
+    return X, y, label_encoders, scaler
 
 def train_knn_model(X_train, y_train):
     """Trains the KNN model."""
     print(f"Training KNN model with {N_NEIGHBORS} neighbors...")
-    # Initialize KNeighborsClassifier or KNeighborsRegressor
-    model = KNeighborsClassifier(n_neighbors=N_NEIGHBORS)
-    # model = KNeighborsRegressor(n_neighbors=N_NEIGHBORS) # If it's a regression task
-
-    # --- TODO: Add any specific model training parameters here ---
+    # Initialize KNeighborsClassifier
+    model = KNeighborsClassifier(n_neighbors=N_NEIGHBORS, weights='distance')
     
     model.fit(X_train, y_train)
     print("Model training complete.")
@@ -87,24 +92,36 @@ def evaluate_model(model, X_test, y_test):
     print("Evaluating model...")
     predictions = model.predict(X_test)
     
-    # Example for classification:
+    # Calculate accuracy
     accuracy = accuracy_score(y_test, predictions)
     print(f"Model Accuracy: {accuracy:.4f}")
     
-    # --- TODO: Add other relevant evaluation metrics ---
-    # For regression, you might use:
-    # from sklearn.metrics import mean_squared_error
-    # mse = mean_squared_error(y_test, predictions)
-    # print(f"Mean Squared Error: {mse:.4f}")
+    # Print detailed classification report
+    print("\nClassification Report:")
+    print(classification_report(y_test, predictions))
 
-def save_model(model, path: str):
-    """Saves the trained model to the specified path."""
-    print(f"Saving model to {path}...")
+def save_artifacts(model, label_encoders, scaler):
+    """Saves the trained model, label encoders, and scaler to the specified paths."""
     try:
-        joblib.dump(model, path)
-        print(f"Model saved successfully to {path}")
+        # Save the model
+        print(f"Saving model to {MODEL_SAVE_PATH}...")
+        joblib.dump(model, MODEL_SAVE_PATH)
+        print(f"Model saved successfully to {MODEL_SAVE_PATH}")
+        
+        # Save the label encoders
+        print(f"Saving label encoders to {ENCODERS_PATH}...")
+        with open(ENCODERS_PATH, 'wb') as f:
+            pickle.dump(label_encoders, f)
+        print(f"Label encoders saved successfully to {ENCODERS_PATH}")
+        
+        # Save the scaler
+        print(f"Saving scaler to {SCALER_PATH}...")
+        with open(SCALER_PATH, 'wb') as f:
+            pickle.dump(scaler, f)
+        print(f"Scaler saved successfully to {SCALER_PATH}")
+        
     except Exception as e:
-        print(f"Error saving model: {e}")
+        print(f"Error saving artifacts: {e}")
 
 def main():
     """Main function to run the training pipeline."""
@@ -117,28 +134,36 @@ def main():
         return
 
     # 2. Preprocess Data
-    X, y = preprocess_data(df.copy()) # Use .copy() to avoid modifying the original DataFrame
+    X, y, label_encoders, scaler = preprocess_data(df.copy())
     if X is None or y is None:
         print("Halting pipeline due to preprocessing issues.")
         return
 
     # 3. Split Data
     print("Splitting data into training and testing sets...")
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=TEST_SIZE, random_state=RANDOM_STATE)
-    print("Data splitting complete.")
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=TEST_SIZE, random_state=RANDOM_STATE, stratify=y)
+    print(f"Training set size: {X_train.shape[0]}, Testing set size: {X_test.shape[0]}")
 
     # 4. Train Model
     model = train_knn_model(X_train, y_train)
 
-    # 5. Evaluate Model (optional, but good practice)
+    # 5. Evaluate Model
     evaluate_model(model, X_test, y_test)
 
-    # 6. Save Model
-    save_model(model, MODEL_SAVE_PATH)
+    # 6. Save Model and other artifacts
+    save_artifacts(model, label_encoders, scaler)
+    
+    # 7. Save the reference data for inference
+    print(f"Saving reference data to {DATASET_PATH}...")
+    df.to_csv(DATASET_PATH, index=False)
     
     print("--- Model Training Pipeline Finished ---")
 
 if __name__ == "__main__":
     main()
-    print(f"\nTo use the trained model, ensure '{MODEL_SAVE_PATH}' is correctly referenced in 'app/services.py'.")
-    print(f"Make sure you have placed your dataset at '{DATASET_PATH}'.")
+    print(f"\nArtifacts have been saved to the following locations:")
+    print(f"  - Model: {MODEL_SAVE_PATH}")
+    print(f"  - Label Encoders: {ENCODERS_PATH}")
+    print(f"  - Scaler: {SCALER_PATH}")
+    print(f"  - Reference Data: {DATASET_PATH}")
+    print("\nThese paths match the ones in app/services.py for inference.")
